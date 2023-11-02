@@ -4,6 +4,8 @@ using Go = import "/go.capnp";
 $Go.package("foobar");
 $Go.import("foobar");
 
+using ByteStream = import "bs/byte-stream.capnp".ByteStream;
+
 interface RaftTransport {
 
   using Timestamp = UInt64;
@@ -65,6 +67,7 @@ interface RaftTransport {
   ) -> (
     header :RpcHeader
   );
+
   installSnapshot @4 (
     header :RpcHeader,
     snapshotVersion :Int64,
@@ -75,12 +78,12 @@ interface RaftTransport {
     peers :Data,
     configuration :Data,
     configurationIndex :UInt64,
-    size :Int64,
-    data :Data
+    size :Int64
   ) -> (
     header :RpcHeader,
     term :UInt64,
-    success :Bool
+    success :Bool,
+    snapshot :ByteStream, 
   );
 }
 

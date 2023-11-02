@@ -1,5 +1,5 @@
 // Package transport provides a Transport for github.com/hashicorp/raft over Capnproto.
-package transport
+package foobar
 
 import (
 	"sync"
@@ -40,11 +40,6 @@ func New(localAddress raft.ServerAddress, options ...Option) *Manager {
 		opt(m)
 	}
 	return m
-}
-
-// Register the RaftTransport gRPC service on a gRPC server.
-func (m *Manager) Register(s *grpc.Server) {
-	pb.RegisterRaftTransportServer(s, gRPCAPI{manager: m})
 }
 
 // Transport returns a raft.Transport that communicates over gRPC.

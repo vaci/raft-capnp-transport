@@ -1,8 +1,7 @@
-package main
+package foobar
 
 import (
 	"fmt"
-	"github.com/vaci/raft-capnp-transport/foobar"
 )
 
 func main() {

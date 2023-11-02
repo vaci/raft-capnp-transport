@@ -1,24 +1,23 @@
-package transport
+package foobar
 
 import (
-	fb "foobar"
 	"github.com/hashicorp/raft"
 )
 
-func encodeLogType(s raft.LogType) pb.Log_LogType {
+func encodeLogType(s raft.LogType) RaftTransport_LogType {
 	switch s {
 	case raft.LogCommand:
-		return tr.Log_LOG_COMMAND
+		return RaftTransport_LogType_command
 	case raft.LogNoop:
-		return tr.Log_LOG_NOOP
+		return RaftTransport_LogType_noop
 	case raft.LogAddPeerDeprecated:
-		return tr.Log_LOG_ADD_PEER_DEPRECATED
+		return RaftTransport_LogType_addPeerDeprecated
 	case raft.LogRemovePeerDeprecated:
-		return tr.Log_LOG_REMOVE_PEER_DEPRECATED
+		return RaftTransport_LogType_removePeerDeprecated
 	case raft.LogBarrier:
-		return tr.Log_LOG_BARRIER
+		return RaftTransport_LogType_barrier
 	case raft.LogConfiguration:
-		return tr.Log_LOG_CONFIGURATION
+		return RaftTransport_LogType_configuration
 	default:
 		panic("invalid LogType")
 	}

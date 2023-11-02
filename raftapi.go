@@ -1,24 +1,49 @@
-package transport
+package foobar
 
 import (
 	"context"
 	"io"
 	"sync"
-	"time"
-
 	"github.com/hashicorp/raft"
+	bs "github.com/vaci/raft-capnp-transport/bs"
 )
 
 // These are calls from the Raft engine that we need to send out over gRPC.
+type RaftTransportServer struct{}
+
+func (RaftTransportServer) RequestVote(ctx context.Context, call RaftTransport_requestVote) error {
+  return nil
+}
 
 type raftAPI struct {
 	manager *Manager
 }
 
 type conn struct {
-	clientConn *grpc.ClientConn
-	client     pb.RaftTransportClient
+	//clientConn *grpc.ClientConn
+	client     RaftTransport
 	mtx        sync.Mutex
+}
+
+func decodeRPCHeader(m *RaftTransport_RpcHeader) raft.RPCHeader {
+	
+	reply := raft.RPCHeader{
+		ProtocolVersion: raft.ProtocolVersion(m.Version()),
+	}
+	{
+		value, err := m.Id()
+		if err != nil {
+			reply.ID = value
+		}
+	}
+	{
+		value, err := m.Addr()
+		if err != nil {
+			reply.Addr = value
+		}
+	}
+	
+	return reply
 }
 
 // Consumer returns a channel that can be used to consume and respond to RPC requests.
@@ -31,7 +56,7 @@ func (r raftAPI) LocalAddr() raft.ServerAddress {
 	return r.manager.localAddress
 }
 
-func (r raftAPI) getPeer(id raft.ServerID, target raft.ServerAddress) (pb.RaftTransportClient, error) {
+func (r raftAPI) getPeer(id raft.ServerID, target raft.ServerAddress) (RaftTransport, error) {
 	r.manager.connectionsMtx.Lock()
 	c, ok := r.manager.connections[id]
 	if !ok {
@@ -44,34 +69,39 @@ func (r raftAPI) getPeer(id raft.ServerID, target raft.ServerAddress) (pb.RaftTr
 		c.mtx.Lock()
 	}
 	defer c.mtx.Unlock()
-	if c.clientConn == nil {
-		conn, err := grpc.Dial(string(target), r.manager.dialOptions...)
-		if err != nil {
-			return nil, err
-		}
-		c.clientConn = conn
-		c.client = pb.NewRaftTransportClient(conn)
-	}
+	//if c.clientConn == nil {
+		//conn, err := rpc.NewConn(rpc.NewStreamTransport(rwc), nil)
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//	c.clientConn = conn
+	//	c.client = pb.NewRaftTransportClient(conn)
+	//}
 	return c.client, nil
 }
 
-// AppendEntries sends the appropriate RPC to the target node.
 func (r raftAPI) AppendEntries(id raft.ServerID, target raft.ServerAddress, args *raft.AppendEntriesRequest, resp *raft.AppendEntriesResponse) error {
 	c, err := r.getPeer(id, target)
 	if err != nil {
 		return err
 	}
-	ctx := context.TODO()
-	if r.manager.heartbeatTimeout > 0 && isHeartbeat(args) {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, r.manager.heartbeatTimeout)
-		defer cancel()
-	}
-	ret, err := c.AppendEntries(ctx, encodeAppendEntriesRequest(args))
+	method, releaseMethod := c.AppendEntries(context.TODO(), func(params RaftTransport_appendEntries_Params) error {
+		params.SetTerm(args.Term)
+		return nil
+	})
+		defer releaseMethod()
+	reply, err := method.Struct()
 	if err != nil {
 		return err
 	}
-	*resp = *decodeAppendEntriesResponse(ret)
+	header, err := reply.Header()
+	if err != nil {
+		return err
+	}
+	*resp = raft.AppendEntriesResponse{
+		RPCHeader: decodeRPCHeader(&header),
+		Term: reply.Term(),
+	}
 	return nil
 }
 
@@ -81,11 +111,30 @@ func (r raftAPI) RequestVote(id raft.ServerID, target raft.ServerAddress, args *
 	if err != nil {
 		return err
 	}
-	ret, err := c.RequestVote(context.TODO(), encodeRequestVoteRequest(args))
+	method, releaseMethod := c.RequestVote(context.TODO(), func(params  RaftTransport_requestVote_Params) error {
+		params.SetTerm(args.Term)
+		params.SetCandidate(args.Candidate)
+		params.SetLastLogIndex(args.LastLogIndex)
+		params.SetLastLogTerm(args.LastLogTerm)
+		params.SetLeadershipTransfer(args.LeadershipTransfer)
+		return nil
+	})
+	defer releaseMethod()
+	reply, err := method.Struct()
 	if err != nil {
 		return err
 	}
-	*resp = *decodeRequestVoteResponse(ret)
+	header, err := reply.Header()
+	if err != nil {
+		return err
+	}
+	*resp = raft.RequestVoteResponse{
+		RPCHeader: decodeRPCHeader(&header),
+		Term: reply.Term(),
+		//Peers: reply.Peers(),
+		Granted: reply.Granted(),
+	}
+
 	return nil
 }
 
@@ -95,28 +144,46 @@ func (r raftAPI) TimeoutNow(id raft.ServerID, target raft.ServerAddress, args *r
 	if err != nil {
 		return err
 	}
-	ret, err := c.TimeoutNow(context.TODO(), encodeTimeoutNowRequest(args))
+	method, releaseMethod := c.TimeoutNow(context.TODO(), func(params  RaftTransport_timeoutNow_Params) error {
+		return nil
+	})
+	defer releaseMethod()
+	reply, err := method.Struct()
 	if err != nil {
 		return err
 	}
-	*resp = *decodeTimeoutNowResponse(ret)
+	header, err := reply.Header()
+	if err != nil {
+		return err
+	}
+	*resp = raft.TimeoutNowResponse{
+		RPCHeader: decodeRPCHeader(&header),
+	}
 	return nil
 }
 
 // InstallSnapshot is used to push a snapshot down to a follower. The data is read from
 // the ReadCloser and streamed to the client.
-func (r raftAPI) InstallSnapshot(id raft.ServerID, target raft.ServerAddress, req *raft.InstallSnapshotRequest, resp *raft.InstallSnapshotResponse, data io.Reader) error {
+func (r raftAPI) InstallSnapshot(id raft.ServerID, target raft.ServerAddress, args *raft.InstallSnapshotRequest, resp *raft.InstallSnapshotResponse, data io.Reader) error {
 	c, err := r.getPeer(id, target)
 	if err != nil {
 		return err
 	}
-	stream, err := c.InstallSnapshot(context.TODO())
-	if err != nil {
-		return err
-	}
-	if err := stream.Send(encodeInstallSnapshotRequest(req)); err != nil {
-		return err
-	}
+
+	method, releaseMethod := c.InstallSnapshot(context.TODO(), func(params  RaftTransport_installSnapshot_Params) error {
+		params.SetSnapshotVersion(int64(args.SnapshotVersion))
+		params.SetTerm(args.Term)
+		params.SetLeader(args.Leader)
+		params.SetLastLogIndex(args.LastLogIndex)
+		params.SetLastLogTerm(args.LastLogTerm)
+		params.SetPeers(args.Peers)
+		params.SetConfiguration(args.Configuration)
+		params.SetConfigurationIndex(args.ConfigurationIndex)
+		return nil
+	})
+	defer releaseMethod()
+	stream := method.Snapshot()
+
 	var buf [16384]byte
 	for {
 		n, err := data.Read(buf[:])
@@ -126,139 +193,37 @@ func (r raftAPI) InstallSnapshot(id raft.ServerID, target raft.ServerAddress, re
 		if err != nil {
 			return err
 		}
-		if err := stream.Send(&pb.InstallSnapshotRequest{
-			Data: buf[:n],
-		}); err != nil {
+		stream.Write(context.TODO(), func(params bs.ByteStream_write_Params) error {
+			params.SetBytes(buf[:n])
+			return nil
+		})
+		if err != nil {
 			return err
 		}
 	}
-	ret, err := stream.CloseAndRecv()
+	future, releaseMethod := stream.End(context.TODO(), nil)
+	defer releaseMethod()
+	_, err = future.Struct()
 	if err != nil {
 		return err
 	}
-	*resp = *decodeInstallSnapshotResponse(ret)
-	return nil
-}
 
-// AppendEntriesPipeline returns an interface that can be used to pipeline
-// AppendEntries requests.
-func (r raftAPI) AppendEntriesPipeline(id raft.ServerID, target raft.ServerAddress) (raft.AppendPipeline, error) {
-	c, err := r.getPeer(id, target)
+	if err := c.WaitStreaming(); err != nil {
+		return err
+	}
+	
+	reply, err := method.Struct()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	ctx := context.TODO()
-	ctx, cancel := context.WithCancel(ctx)
-	stream, err := c.AppendEntriesPipeline(ctx)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	rpa := raftPipelineAPI{
-		stream:     stream,
-		cancel:     cancel,
-		inflightCh: make(chan *appendFuture, 20),
-		doneCh:     make(chan raft.AppendFuture, 20),
-	}
-	go rpa.receiver()
-	return rpa, nil
-}
 
-type raftPipelineAPI struct {
-	stream        pb.RaftTransport_AppendEntriesPipelineClient
-	cancel        func()
-	inflightChMtx sync.Mutex
-	inflightCh    chan *appendFuture
-	doneCh        chan raft.AppendFuture
-}
-
-// AppendEntries is used to add another request to the pipeline.
-// The send may block which is an effective form of back-pressure.
-func (r raftPipelineAPI) AppendEntries(req *raft.AppendEntriesRequest, resp *raft.AppendEntriesResponse) (raft.AppendFuture, error) {
-	af := &appendFuture{
-		start:   time.Now(),
-		request: req,
-		done:    make(chan struct{}),
+	header, err := reply.Header()
+	*resp = raft.InstallSnapshotResponse{
+		RPCHeader: decodeRPCHeader(&header),
+		Term: reply.Term(),
+		Success: reply.Success(),
 	}
-	if err := r.stream.Send(encodeAppendEntriesRequest(req)); err != nil {
-		return nil, err
-	}
-	r.inflightChMtx.Lock()
-	select {
-	case <-r.stream.Context().Done():
-	default:
-		r.inflightCh <- af
-	}
-	r.inflightChMtx.Unlock()
-	return af, nil
-}
-
-// Consumer returns a channel that can be used to consume
-// response futures when they are ready.
-func (r raftPipelineAPI) Consumer() <-chan raft.AppendFuture {
-	return r.doneCh
-}
-
-// Close closes the pipeline and cancels all inflight RPCs
-func (r raftPipelineAPI) Close() error {
-	r.cancel()
-	r.inflightChMtx.Lock()
-	close(r.inflightCh)
-	r.inflightChMtx.Unlock()
 	return nil
-}
-
-func (r raftPipelineAPI) receiver() {
-	for af := range r.inflightCh {
-		msg, err := r.stream.Recv()
-		if err != nil {
-			af.err = err
-		} else {
-			af.response = *decodeAppendEntriesResponse(msg)
-		}
-		close(af.done)
-		r.doneCh <- af
-	}
-}
-
-type appendFuture struct {
-	raft.AppendFuture
-
-	start    time.Time
-	request  *raft.AppendEntriesRequest
-	response raft.AppendEntriesResponse
-	err      error
-	done     chan struct{}
-}
-
-// Error blocks until the future arrives and then
-// returns the error status of the future.
-// This may be called any number of times - all
-// calls will return the same value.
-// Note that it is not OK to call this method
-// twice concurrently on the same Future instance.
-func (f *appendFuture) Error() error {
-	<-f.done
-	return f.err
-}
-
-// Start returns the time that the append request was started.
-// It is always OK to call this method.
-func (f *appendFuture) Start() time.Time {
-	return f.start
-}
-
-// Request holds the parameters of the AppendEntries call.
-// It is always OK to call this method.
-func (f *appendFuture) Request() *raft.AppendEntriesRequest {
-	return f.request
-}
-
-// Response holds the results of the AppendEntries call.
-// This method must only be called after the Error
-// method returns, and will only be valid on success.
-func (f *appendFuture) Response() *raft.AppendEntriesResponse {
-	return &f.response
 }
 
 // EncodePeer is used to serialize a peer's address.
